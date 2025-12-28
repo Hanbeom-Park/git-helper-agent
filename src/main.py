@@ -159,7 +159,6 @@ def run_batch(
         Exit code (0 for success, 1 for failure).
     """
     from src.services.github import GitHubService
-    from src.tools.changelog_tools import categorize_commit_message
 
     owner = owner or os.getenv("GITHUB_OWNER")
     repo = repo or os.getenv("GITHUB_REPO")
@@ -203,9 +202,9 @@ def run_batch(
 
         console.print(f"[green]✓ {len(commits)}개 커밋 발견[/green]")
 
-        # Get commit details and summarize with LLM
+        # Get commit details and summarize with LLM (chronological order)
         console.print("[dim]커밋 상세 내용 분석 및 AI 요약 중...[/dim]")
-        categorized: dict[str, list] = {}
+        commit_list: list[dict] = []
 
         for i, commit in enumerate(commits):
             console.print(f"[dim]  [{i+1}/{len(commits)}] {commit.sha[:7]} 분석 중...[/dim]")
@@ -221,25 +220,21 @@ def run_batch(
                     console.print(f"[yellow]    경고: 상세 정보 조회 실패 - {e}[/yellow]")
                 summary = commit.message.split("\n")[0][:80]
 
-            # Categorize commit
-            category = categorize_commit_message.invoke({"message": commit.message})
-            if category not in categorized:
-                categorized[category] = []
-
-            categorized[category].append({
+            commit_list.append({
                 "message": commit.message.split("\n")[0][:80],
                 "summary": summary,
                 "sha": commit.sha[:7],
                 "author": commit.author,
-                "date": commit.date.strftime("%Y-%m-%d"),
+                "date": commit.date,
+                "date_str": commit.date.strftime("%Y-%m-%d %H:%M"),
             })
 
         console.print(f"[green]✓ AI 요약 완료[/green]")
 
-        # Generate changelog markdown
+        # Generate changelog markdown (chronological order)
         console.print("[dim]Changelog 생성 중...[/dim]")
         changelog_md = generate_changelog_markdown(
-            categorized=categorized,
+            commits=commit_list,
             start_date=since.strftime("%Y-%m-%d"),
             end_date=until.strftime("%Y-%m-%d"),
         )
@@ -285,24 +280,11 @@ def run_batch(
 
 
 def generate_changelog_markdown(
-    categorized: dict[str, list],
+    commits: list[dict],
     start_date: str,
     end_date: str,
 ) -> str:
-    """Generate changelog markdown from categorized commits with AI summaries."""
-    category_labels = {
-        "feat": "✨ Features",
-        "fix": "🐛 Bug Fixes",
-        "docs": "📚 Documentation",
-        "refactor": "♻️ Refactoring",
-        "perf": "⚡ Performance",
-        "test": "✅ Tests",
-        "chore": "🔧 Chores",
-        "style": "💄 Styles",
-        "ci": "👷 CI/CD",
-        "other": "📦 Other Changes",
-    }
-
+    """Generate changelog markdown in chronological order with AI summaries."""
     lines = [
         f"## Changelog",
         f"",
@@ -310,19 +292,37 @@ def generate_changelog_markdown(
         f"",
         f"> 🤖 *AI가 분석한 변경사항 요약*",
         f"",
+        f"---",
+        f"",
     ]
 
-    for cat_key in category_labels:
-        if cat_key in categorized and categorized[cat_key]:
-            lines.append(f"### {category_labels[cat_key]}")
-            lines.append("")
-            for commit in categorized[cat_key]:
-                # Use AI summary if available, otherwise fallback to commit message
-                summary = commit.get('summary', commit['message'])
-                lines.append(f"- **{commit['message'][:50]}** ({commit['sha']})")
-                lines.append(f"  - {summary}")
-                lines.append(f"  - *@{commit['author']} ({commit['date']})*")
+    # Sort commits by date (newest first)
+    sorted_commits = sorted(commits, key=lambda x: x['date'], reverse=True)
+
+    # Group commits by date
+    current_date = None
+    for commit in sorted_commits:
+        commit_date = commit['date'].strftime("%Y-%m-%d")
+
+        # Add date header if date changed
+        if commit_date != current_date:
+            if current_date is not None:
                 lines.append("")
+            lines.append(f"### 📅 {commit_date}")
+            lines.append("")
+            current_date = commit_date
+
+        # Add commit entry with time
+        time_str = commit['date'].strftime("%H:%M")
+        summary = commit.get('summary', commit['message'])
+        lines.append(f"**`{time_str}`** | `{commit['sha']}` | @{commit['author']}")
+        lines.append(f"")
+        lines.append(f"**{commit['message']}**")
+        lines.append(f"")
+        lines.append(f"> {summary}")
+        lines.append(f"")
+        lines.append(f"---")
+        lines.append(f"")
 
     return "\n".join(lines)
 
